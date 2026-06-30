@@ -73,6 +73,16 @@
     }
   }
 
+  // ponytail: WebKitGTK can't render Zalo/Facebook web apps — give users an escape hatch.
+  async function openInBrowser(url) {
+    try {
+      error = "";
+      await invoke("plugin:opener|open_url", { url, withBrowser: true });
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
   $: filtered = accounts.filter(a => !filter || a.platform === filter);
   $: activePlatform = platformMap[filter];
 
@@ -206,6 +216,9 @@
               <button class="btn btn-primary btn-sm" on:click={() => openAccount(account.id)}>
                 Open
               </button>
+              <button class="btn btn-ghost btn-sm" on:click={() => openInBrowser(account.url)} title="Open in system browser">
+                ↗
+              </button>
               <button class="btn btn-danger btn-sm" on:click={() => removeAccount(account.id)}>
                 <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
                   <path d="M2 4h10M5 4V2.5A.5.5 0 015.5 2h3a.5.5 0 01.5.5V4M3 4v7.5A1.5 1.5 0 004.5 13h5a1.5 1.5 0 001.5-1.5V4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
@@ -220,29 +233,6 @@
 </div>
 
 <style>
-  :global(*) {
-    margin: 0;
-    padding: 0;
-    box-sizing: border-box;
-  }
-
-  :global(:root) {
-    font-size: clamp(15px, 1vw + 0.5rem, 20px);
-  }
-
-  :global(body) {
-    font-family: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-    background: #0e0e10;
-    color: #e8e8ea;
-    overflow: hidden;
-    height: 100vh;
-    -webkit-font-smoothing: antialiased;
-  }
-
-  :global(#app) {
-    height: 100vh;
-  }
-
   .shell {
     display: flex;
     height: 100vh;

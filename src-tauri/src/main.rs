@@ -7,6 +7,10 @@ use state::AppState;
 use tauri::{WebviewUrl, WebviewWindowBuilder};
 
 fn main() {
+    // ponytail: tauri-apps/tauri#9394 — fix WebKitGTK blank-window bug on some Linux drivers.
+    #[cfg(target_os = "linux")]
+    std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+
     let data_dir = AppState::app_data_dir();
     let config_path = data_dir.join("config.toml");
     let sessions_dir = data_dir.join("sessions");
@@ -16,6 +20,7 @@ fn main() {
     let config = AppState::load_config(&config_path);
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
         .manage(AppState {
             config: std::sync::RwLock::new(config),
             config_path,

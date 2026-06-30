@@ -105,5 +105,8 @@ pub fn open_account(
         .navigate(target_url)
         .map_err(|e| format!("Failed to navigate: {e}"))?;
 
+    // ponytail: devtools active in all builds while debugging Zalo
+    window.open_devtools();
+
     Ok(())
 }
