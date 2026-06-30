@@ -25,6 +25,8 @@
             libsoup_3
             glib-networking
             nodejs
+            gst_all_1.gst-plugins-base
+            gst_all_1.gst-plugins-good
           ];
           PKG_CONFIG_PATH = "${pkgs.webkitgtk_4_1.dev}/lib/pkgconfig";
           shellHook = ''
