@@ -88,7 +88,7 @@ pub fn open_account(
 
     #[cfg(target_os = "linux")]
     {
-        use webkit2gtk::{WebViewExt, WebContextExt, TLSErrorsPolicy};
+        use webkit2gtk::{WebViewExt, WebContextExt, TLSErrorsPolicy, SettingsExt};
         // ponytail: clone() so window survives with_webview() consuming self.
         #[allow(deprecated)]
         window
@@ -97,8 +97,11 @@ pub fn open_account(
                 if let Some(ctx) = pwv.inner().context() {
                     ctx.set_tls_errors_policy(TLSErrorsPolicy::Ignore);
                 }
+                if let Some(settings) = pwv.inner().settings() {
+                    settings.set_javascript_can_open_windows_automatically(true);
+                }
             })
-            .map_err(|e| format!("Failed to configure webview TLS: {e}"))?;
+            .map_err(|e| format!("Failed to configure webview: {e}"))?;
     }
 
     window

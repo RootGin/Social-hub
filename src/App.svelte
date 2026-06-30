@@ -17,6 +17,7 @@
     { key: "instagram", label: "Instagram", url: "https://www.instagram.com", color: "#E1306C" },
     { key: "facebook", label: "Facebook",   url: "https://www.facebook.com", color: "#1877F2" },
     { key: "tiktok",  label: "TikTok",     url: "https://www.tiktok.com",  color: "#00F2EA" },
+    { key: "google",  label: "Google",     url: "https://accounts.google.com", color: "#4285F4" },
   ];
 
   const platformMap = {};
@@ -87,7 +88,7 @@
   $: activePlatform = platformMap[filter];
 
   function platformInitial(key) {
-    return key === "facebook" ? "f/" : key === "instagram" ? "ig" : key.charAt(0).toUpperCase();
+    return key === "facebook" ? "f/" : key === "instagram" ? "ig" : key === "google" ? "G" : key.charAt(0).toUpperCase();
   }
 </script>
 
