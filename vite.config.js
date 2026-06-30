@@ -1,22 +1,39 @@
 import { defineConfig } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { compile } from "svelte/compiler";
 
-// ponytail: svelte plugin returns undefined from load() when a style query
-// hits a cold cache. Vite then reads the .svelte file as if it were CSS and
-// PostCSS chokes on the <script> block. We compile the file ourselves and
-// return the extracted CSS directly.
+// ponytail: svelte plugin returns undefined from load() for a cold-cache
+// ?type=style query. Vite then reads the .svelte file as CSS and PostCSS
+// chokes on the <script> block. We compile the file ourselves with the
+// same cssHash as the svelte plugin so the CSS class names match.
 function svelteStyleFallback() {
+  let root = "";
   return {
     name: "svelte-style-fallback",
     enforce: "pre",
+    configResolved(config) {
+      root = config.root;
+    },
     load(id) {
       const queryIdx = id.indexOf("?svelte&type=style");
       if (queryIdx === -1) return;
-      const filename = id.slice(0, queryIdx);
-      const source = readFileSync(filename, "utf-8");
-      const { css } = compile(source, { filename, generate: "dom", css: "external" });
+      const fullPath = id.slice(0, queryIdx);
+      // normalizedFilename = strip root prefix (matching id.js normalize())
+      const normalized = fullPath.startsWith(root + "/") ? fullPath.slice(root.length) : fullPath;
+      // replicate @sveltejs/vite-plugin-svelte's dev-mode cssHash
+      // MD5 → base64 → URL-safe (MUST match hash.js exactly)
+      const b64 = createHash("md5").update(normalized).digest("base64");
+      const safe = b64.replace(/[+/=]/g, (c) => ({ "+": "-", "/": "_", "=": "" })[c]);
+      const hash = "s-" + safe.slice(0, 12);
+      const source = readFileSync(fullPath, "utf-8");
+      const { css } = compile(source, {
+        filename: fullPath,
+        generate: "dom",
+        css: "external",
+        cssHash: () => hash,
+      });
       return css || "/* empty */";
     },
   };
