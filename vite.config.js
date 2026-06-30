@@ -30,6 +30,9 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+    // ponytail: Vite binds IPv6-only by default. The Tauri webview resolves
+    // localhost to 127.0.0.1 first and fails to connect. Bind IPv4 explicitly.
+    host: "127.0.0.1",
   },
 
   envPrefix: ["VITE_", "TAURI_"],
