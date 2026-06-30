@@ -81,4 +81,4 @@ Social-hub/
 
 ## License
 
-MIT
+This is free and unencumbered software released into the public domain under [The Unlicense](https://unlicense.org/).
