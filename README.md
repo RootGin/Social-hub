@@ -14,13 +14,13 @@ Users who manage multiple social media presences (personal, work, side projects)
 
 Each platform runs in its own webview with session isolation:
 
-| Platform | Purpose |
-|---|---|
-| **Zalo** | Primary messaging for Vietnamese users |
-| **Twitter / X** | Real-time news, professional networking, content scheduling |
-| **Instagram** | Visual content management, brand engagement |
-| **Facebook** | Community management, page administration |
-| **TikTok** | Short-form video content monitoring |
+| Platform | Purpose | Status |
+|---|---|---|---|
+| **Zalo** | Primary messaging for Vietnamese users | ✅ Working |
+| **Twitter / X** | Real-time news, professional networking, content scheduling | ❌ Login blocked — WebKitGTK detected by X's anti-bot measures |
+| **Instagram** | Visual content management, brand engagement | ✅ Working |
+| **Facebook** | Community management, page administration | ✅ Working |
+| **TikTok** | Short-form video content monitoring | ✅ Working |
 
 ### Session Isolation
 
@@ -58,6 +58,14 @@ npm run tauri build
 ```bash
 nix develop --command npm run tauri dev
 ```
+
+## Developer's Note
+
+> "If I'd known how hard this would be, I never would have started it. I hate everything about this project."
+>
+> — The person who built it
+
+Building a social media client on WebKitGTK is an exercise in suffering. Every platform has different auth flows, WebKitGTK fingerprinting is an arms race, Wayland clipboard protocols are a labyrinth, and GStreamer codec support on NixOS is a journey in itself. If you're reading this and considering embarking on a similar project: bring snacks, bring patience, and don't say you weren't warned.
 
 ## Project Structure
 

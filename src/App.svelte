@@ -6,17 +6,25 @@
   let error = "";
   let filter = "";
   let showForm = false;
+  let editing = null;      // account id whose label is being edited
+  let editValue = "";      // current value in the edit input
 
   let newPlatform = "zalo";
   let newLabel = "";
   let newUrl = "";
 
+  // SVGs simplified from Ferdium's recipe icons for 24x24 sidebar buttons.
   const PLATFORMS = [
-    { key: "zalo",   label: "Zalo",       url: "https://chat.zalo.me",    color: "#0068FF" },
-    { key: "twitter", label: "Twitter (X)", url: "https://x.com",          color: "#000000" },
-    { key: "instagram", label: "Instagram", url: "https://www.instagram.com", color: "#E1306C" },
-    { key: "facebook", label: "Facebook",   url: "https://www.facebook.com", color: "#1877F2" },
-    { key: "tiktok",  label: "TikTok",     url: "https://www.tiktok.com",  color: "#00F2EA" },
+    { key: "zalo",   label: "Zalo",       url: "https://chat.zalo.me",     color: "#0068FF",
+      svg: `<svg viewBox="0 0 24 24" fill="none"><rect x="1" y="1" width="22" height="22" rx="5" fill="currentColor"/><path d="M7 8c0-.6.4-1 1-1h8c.6 0 1 .4 1 1v6c0 .6-.4 1-1 1H8c-.6 0-1-.4-1-1V8z" fill="var(--sidebar-bg,#0e0e10)"/><path d="M10 10l4 3h-4v-3z" fill="currentColor"/></svg>` },
+    { key: "twitter", label: "Twitter (X)", url: "https://x.com",           color: "#000000",
+      svg: `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>` },
+    { key: "instagram", label: "Instagram", url: "https://www.instagram.com", color: "#E1306C",
+      svg: `<svg viewBox="0 0 24 24" fill="none"><rect x="2" y="2" width="20" height="20" rx="5" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="5" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="17.5" cy="6.5" r="1.5" fill="currentColor"/></svg>` },
+    { key: "facebook", label: "Facebook",   url: "https://www.facebook.com", color: "#1877F2",
+      svg: `<svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" fill="currentColor"/><path d="M13 21v-7h3l.5-3H13V9c0-1 .3-1.5 1.5-1.5H17V4.5c-.8-.1-2.5-.2-3.5-.2C9.8 4.3 8 6 8 9.5V11H5.5v3H8v7" fill="var(--sidebar-bg,#0e0e10)"/></svg>` },
+    { key: "tiktok",  label: "TikTok",     url: "https://www.tiktok.com",  color: "#00F2EA",
+      svg: `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M14 2v15c0 2.2-1.8 4-4 4s-4-1.8-4-4 1.8-4 4-4c.6 0 1 .4 1 1V7l8-1v3l-5 1"/></svg>` },
   ];
 
   const platformMap = {};
@@ -64,6 +72,30 @@
     }
   }
 
+  function startEdit(account) {
+    editValue = account.label;
+    editing = account.id;
+  }
+
+  async function saveEdit() {
+    if (!editing || !editValue.trim()) return;
+    try {
+      error = "";
+      await invoke("rename_account", { id: editing, label: editValue.trim() });
+      editing = null;
+      editValue = "";
+      await loadAccounts();
+    } catch (e) {
+      error = String(e);
+      editing = null;
+    }
+  }
+
+  function cancelEdit() {
+    editing = null;
+    editValue = "";
+  }
+
   async function openAccount(id) {
     try {
       error = "";
@@ -86,9 +118,12 @@
   $: filtered = accounts.filter(a => !filter || a.platform === filter);
   $: activePlatform = platformMap[filter];
 
-  function platformInitial(key) {
-    return key === "facebook" ? "f/" : key === "instagram" ? "ig" : key.charAt(0).toUpperCase();
+  // ponytail: Svelte use:action to focus on mount (avoids a11y autofocus warning)
+  function autoFocus(node) {
+    node.focus();
   }
+
+
 </script>
 
 <div class="shell">
@@ -118,7 +153,7 @@
           title={p.label}
           style="--accent: {p.color}"
         >
-          <span class="icon-letter">{platformInitial(p.key)}</span>
+          <span class="platform-svg">{@html p.svg}</span>
         </button>
       {/each}
     </div>
@@ -207,7 +242,20 @@
             <div class="card-indicator"></div>
             <div class="card-body">
               <div class="card-top">
-                <strong class="card-label">{account.label}</strong>
+                {#if editing === account.id}
+                  <form class="edit-form" on:submit|preventDefault={saveEdit}>
+                    <input
+                      class="edit-input"
+                      type="text"
+                      bind:value={editValue}
+                      on:blur={saveEdit}
+                      use:autoFocus
+                    />
+                  </form>
+                {:else}
+                  <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+                  <span class="card-label" on:click={() => startEdit(account)} on:keydown={(e) => e.key === 'Enter' && startEdit(account)} role="button" tabindex="0">{account.label}</span>
+                {/if}
                 <span class="card-platform">{(platformMap[account.platform] || {}).label || account.platform}</span>
               </div>
               <div class="card-url">{account.url}</div>
@@ -328,17 +376,20 @@
     background: #888;
   }
 
-  .icon-letter {
-    font-size: 1.125rem;
-    font-weight: 800;
-    letter-spacing: -0.02em;
-    color: var(--accent, inherit);
-  }
-  .platform-icon .icon-letter {
+  .platform-svg {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.5rem;
+    height: 1.5rem;
     color: #ddd;
   }
-  .platform-icon.active .icon-letter,
-  .platform-icon:hover .icon-letter {
+  .platform-svg :global(svg) {
+    width: 100%;
+    height: 100%;
+  }
+  .platform-icon.active .platform-svg,
+  .platform-icon:hover .platform-svg {
     color: #fff;
   }
 
@@ -630,6 +681,32 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .card-label {
+    cursor: text;
+  }
+
+  .edit-form {
+    display: inline-flex;
+  }
+
+  .edit-input {
+    font-size: 0.875rem;
+    font-weight: 600;
+    font-family: inherit;
+    padding: 0 0.25rem;
+    margin: -0.125rem 0;
+    border: 1px solid #3a3a3e;
+    border-radius: 0.25rem;
+    background: #1a1a1d;
+    color: #e8e8ea;
+    outline: none;
+    width: 12rem;
+    line-height: 1.4;
+  }
+  .edit-input:focus {
+    border-color: #3b82f6;
   }
 
   .card-platform {

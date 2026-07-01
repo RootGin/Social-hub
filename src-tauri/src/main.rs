@@ -7,9 +7,14 @@ use state::AppState;
 use tauri::{WebviewUrl, WebviewWindowBuilder};
 
 fn main() {
-    // ponytail: tauri-apps/tauri#9394 — fix WebKitGTK blank-window bug on some Linux drivers.
+    // DMABUF disabled — fixes blank window on Niri/Wayland (tauri-apps/tauri#9394).
+    // Re-enable scrolling performance by commenting out if your GPU handles DMABUF.
     #[cfg(target_os = "linux")]
     std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    // Force native non-overlay scrollbars — fixes event-detection issues in
+    // complex web-app modals (Facebook post overlays, Twitter DM panels, etc.).
+    #[cfg(target_os = "linux")]
+    std::env::set_var("GTK_OVERLAY_SCROLLING", "0");
 
     let data_dir = AppState::app_data_dir();
     let config_path = data_dir.join("config.toml");
@@ -43,6 +48,8 @@ fn main() {
             commands::list_accounts,
             commands::add_account,
             commands::remove_account,
+            commands::rename_account,
+            commands::copy_image,
             commands::open_account,
         ])
         .run(tauri::generate_context!())
