@@ -15,12 +15,12 @@ Users who manage multiple social media presences (personal, work, side projects)
 Each platform runs in its own webview with session isolation:
 
 | Platform | Purpose | Status |
-|---|---|---|---|
-| **Zalo** | Primary messaging for Vietnamese users | ✅ Working |
-| **Twitter / X** | Real-time news, professional networking, content scheduling | ❌ Login blocked — WebKitGTK detected by X's anti-bot measures |
-| **Instagram** | Visual content management, brand engagement | ✅ Working |
-| **Facebook** | Community management, page administration | ✅ Working |
-| **TikTok** | Short-form video content monitoring | ✅ Working |
+| --- | --- | --- |
+| Zalo | Primary messaging for Vietnamese users | ✅ Working |
+| Twitter / X | Real-time news, professional networking, content scheduling | ❌ Login blocked — WebKitGTK detected by X's anti-bot measures |
+| Instagram | Visual content management, brand engagement | ✅ Working |
+| Facebook | Community management, page administration | ✅ Working |
+| TikTok | Short-form video content monitoring | ✅ Working |
 
 ### Session Isolation
 
