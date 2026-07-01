@@ -39,8 +39,13 @@ function svelteStyleFallback() {
   };
 }
 
-export default defineConfig({
-  plugins: [svelteStyleFallback(), svelte()],
+export default defineConfig(({ command }) => ({
+  // ponytail: svelteStyleFallback is dev-only — it patches a cold-cache
+  // bug in the official plugin for `?svelte&type=style` queries. In
+  // production builds the official plugin handles it correctly, AND
+  // the fallback's hardcoded `s-` hash prefix mismatches the official
+  // plugin's `svelte-` prefix when HMR is off, breaking all CSS scoping.
+  plugins: command === "build" ? [svelte()] : [svelteStyleFallback(), svelte()],
 
   clearScreen: false,
 
@@ -59,4 +64,4 @@ export default defineConfig({
     minify: !process.env.TAURI_DEBUG ? "esbuild" : false,
     sourcemap: !!process.env.TAURI_DEBUG,
   },
-});
+}));

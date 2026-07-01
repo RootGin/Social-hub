@@ -3278,6 +3278,7 @@ name = "social-manager"
 version = "0.1.0"
 dependencies = [
  "dirs",
+ "gtk",
  "rfd",
  "serde",
  "serde_json",

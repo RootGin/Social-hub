@@ -1,8 +1,37 @@
-use crate::state::{Account, AppState, generate_id};
+use crate::state::{self, Account, AppState, generate_id};
 use std::io::Read;
-use tauri::State;
-use tauri::WebviewUrl;
+use std::sync::mpsc;
+use tauri::{Manager, State};
+use tauri::{LogicalPosition, LogicalSize, WebviewBuilder, WebviewUrl};
 use url::Url;
+
+/// Runs `f` on the GTK main thread and blocks the calling (worker) thread
+/// until it finishes, forwarding back whatever `f` returns.
+///
+/// All widget-mutating Tauri/WebKitGTK calls (add_child, set_position,
+/// set_size, show, hide, with_webview, open_devtools) MUST happen on the
+/// main thread on Linux — GTK is not thread-safe. Tauri commands that are
+/// plain `fn` (not `async fn`) are dispatched onto a blocking worker thread
+/// pool by default, NOT the main thread, so calling these APIs directly
+/// from a command body races with GTK's own layout pass and produces
+/// exactly the kind of "renders, but geometry is scrambled" bug we saw
+/// (tabs positioned over the sidebar, pinned to the wrong half of the
+/// window, etc). Route everything through here instead.
+fn on_main_thread<F, T>(app: &tauri::AppHandle, f: F) -> Result<T, String>
+where
+    F: FnOnce(&tauri::AppHandle) -> Result<T, String> + Send + 'static,
+    T: Send + 'static,
+{
+    let (tx, rx) = mpsc::channel();
+    let app_for_main_thread = app.clone();
+    app.run_on_main_thread(move || {
+        let result = f(&app_for_main_thread);
+        let _ = tx.send(result);
+    })
+    .map_err(|e| format!("Failed to schedule on main thread: {e}"))?;
+    rx.recv()
+        .map_err(|e| format!("Main thread task dropped: {e}"))?
+}
 
 // Platform-specific CSS fixes (like Ferdium's service.css).
 // SCROLLBAR snippet is manually inlined since Rust's concat!() doesn't accept consts.
@@ -77,8 +106,23 @@ fn build_init_script(platform: &str) -> String {
     let mut parts = String::from(WHEEL_SMOOTHER);
     parts.push_str(IMAGE_COPY_INTERCEPTOR);
     if !css.is_empty() {
+        // Guard against document.head being null at init-script time
+        // (init scripts run before DOM parse completes on some pages).
+        // Try immediate injection, fall back to DOMContentLoaded.
         parts.push_str(&format!(
-            "(function(){{var s=document.createElement('style');s.textContent='{}';document.head.appendChild(s);}})();",
+            r#"(function(){{
+              var css='{}';
+              function inject(){{
+                if(!document.head)return false;
+                var s=document.createElement('style');
+                s.textContent=css;
+                document.head.appendChild(s);
+                return true;
+              }}
+              if(!inject()){{
+                document.addEventListener('DOMContentLoaded',inject,{{once:true}});
+              }}
+            }})();"#,
             css.replace('\'', r"\'")
         ));
     }
@@ -240,6 +284,259 @@ pub fn rename_account(
     AppState::save_config(&state.config_path, &config)
 }
 
+/// Opens an account in a new tab within the main window (instead of a separate
+/// OS window). Returns the tab label so the frontend can register the tab.
+#[tauri::command]
+pub fn open_account(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    account_id: String,
+) -> Result<String, String> {
+    let (account, session_dir) = {
+        let config = state.config.read().map_err(|e| e.to_string())?;
+        let account = config
+            .accounts
+            .iter()
+            .find(|a| a.id == account_id)
+            .cloned()
+            .ok_or_else(|| "Account not found".to_string())?;
+        let session_dir = state.sessions_dir.join(&account.id);
+        (account, session_dir)
+    };
+
+    let tab_label = format!("tab_{}", account.id);
+    let target_url = account
+        .url
+        .parse::<Url>()
+        .map_err(|e| format!("Invalid URL: {e}"))?;
+
+    std::fs::create_dir_all(&session_dir).map_err(|e| format!("{e}"))?;
+
+    // If a tab for this account already exists, just switch to it
+    if let Some(_existing) = app.get_webview(&tab_label) {
+        return Ok(tab_label);
+    }
+
+    // Use the viewport rect emitted by the Svelte frontend via update_viewport.
+    // The frontend is responsible for measuring the DOM *after* the tab bar
+    // has actually been added to the layout (see App.svelte's openAccount),
+    // so by the time we get here VIEWPORT should already reflect final,
+    // accurate coordinates. We no longer guess — a stale/zeroed viewport is
+    // a bug in the caller, not something to silently paper over with magic
+    // numbers tied to a specific window size.
+    let (px, py, pw, ph) = {
+        let vp = state::VIEWPORT.lock().unwrap_or_else(|e| e.into_inner());
+        if !vp.is_valid() {
+            return Err(
+                "Viewport not ready — frontend must call update_viewport with the real \
+                 post-tab-bar layout before opening a tab."
+                    .to_string(),
+            );
+        }
+        (vp.x, vp.y, vp.width, vp.height)
+    };
+
+    let platform = account.platform.clone();
+
+    // Everything below touches GTK widgets and MUST run on the main thread —
+    // add_child, with_webview, and open_devtools will misbehave (silently
+    // wrong position/size, or worse) if called from this command's worker
+    // thread on Linux.
+    on_main_thread(&app, move |app| {
+        let main_window = app
+            .get_window("main")
+            .ok_or_else(|| "Main window not found".to_string())?;
+
+        let wv = main_window
+            .add_child(
+                WebviewBuilder::new(&tab_label, WebviewUrl::External(target_url))
+                    .data_directory(session_dir)
+                    .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
+                    .initialization_script(&build_init_script(&platform))
+                    .enable_clipboard_access()
+                    // X login opens OAuth popups — allow them by default
+                    .on_new_window(|_url, _features| {
+                        tauri::webview::NewWindowResponse::Allow
+                    })
+                    // Native "Save As…" dialog on download
+                    .on_download(|_webview, event| {
+                        match event {
+                            tauri::webview::DownloadEvent::Requested { url, destination } => {
+                                let name = url
+                                    .path_segments()
+                                    .and_then(|s| s.last())
+                                    .unwrap_or("download")
+                                    .to_string();
+                                if let Some(dlg) = rfd::FileDialog::new()
+                                    .set_title("Save As…")
+                                    .set_file_name(&name)
+                                    .save_file()
+                                {
+                                    *destination = dlg;
+                                    true
+                                } else {
+                                    false
+                                }
+                            }
+                            _ => true,
+                        }
+                    }),
+                LogicalPosition::new(px, py),
+                LogicalSize::new(pw.max(200.0), ph.max(100.0)),
+            )
+            .map_err(|e| format!("Failed to create tab: {e}"))?;
+
+        // WebKitGTK-specific configuration
+        #[cfg(target_os = "linux")]
+        {
+            use webkit2gtk::{HardwareAccelerationPolicy, SettingsExt, WebViewExt};
+            use gtk::prelude::{ContainerExt, FixedExt, WidgetExt};
+            let _ = wv.with_webview(move |pwv| {
+                let webview = pwv.inner();
+                if let Some(settings) = WebViewExt::settings(&webview) {
+                    settings.set_javascript_can_open_windows_automatically(true);
+                    settings.set_javascript_can_access_clipboard(true);
+                    settings.set_enable_webgl(true);
+                    settings.set_enable_webaudio(true);
+                    settings.set_enable_media(true);
+                    settings.set_enable_mediasource(true);
+                    settings.set_enable_media_capabilities(true);
+                    settings.set_enable_media_stream(true);
+                    settings.set_enable_encrypted_media(true);
+                    settings.set_enable_fullscreen(true);
+                    settings.set_enable_page_cache(true);
+                    settings.set_enable_smooth_scrolling(false);
+                    settings.set_enable_site_specific_quirks(true);
+                    settings.set_enable_webrtc(true);
+                    settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::Always);
+                }
+                // Reparent: remove from GtkBox, add to our GtkFixed.
+                // The fixed is positioned at the viewport rect by
+                // update_viewport, so the webview goes at (0,0)
+                // within the fixed. This is the only way to get
+                // correct positioning on Wayland (wry's set_bounds
+                // is a no-op for GtkBox children).
+                use std::sync::atomic::Ordering;
+                use webkit2gtk::glib::translate::FromGlibPtrNone;
+                use webkit2gtk::glib::Cast;
+                if let Some(parent) = webview.parent() {
+                    parent
+                        .dynamic_cast_ref::<gtk::Container>()
+                        .map(|c| c.remove(&webview));
+                }
+                let ptr = state::FIXED_CONTAINER.load(Ordering::SeqCst);
+                if !ptr.is_null() {
+                    let fixed = unsafe {
+                        <gtk::Fixed as FromGlibPtrNone<*mut gtk::ffi::GtkFixed>>::from_glib_none(
+                            ptr as *mut gtk::ffi::GtkFixed,
+                        )
+                    };
+                    fixed.put(&webview, 0, 0);
+                }
+                webview.set_size_request(
+                    (pw.max(200.0)) as i32, (ph.max(100.0)) as i32,
+                );
+            });
+        }
+
+        // devtools always on while debugging
+        wv.open_devtools();
+
+        Ok(tab_label)
+    })
+}
+
+/// Stores the latest content-area rectangle from the Svelte layout and
+/// repositions all existing tab webviews to match.
+#[tauri::command]
+pub fn update_viewport(
+    app: tauri::AppHandle,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    {
+        let mut vp = state::VIEWPORT.lock().unwrap_or_else(|e| e.into_inner());
+        vp.x = x;
+        vp.y = y;
+        vp.width = width;
+        vp.height = height;
+    }
+
+    on_main_thread(&app, move |_app| {
+        // Move the GtkFixed overlay child to the new viewport rect.
+        // Tab webviews inside the GtkFixed are positioned at (0,0)
+        // relative to the fixed, so they move with it automatically.
+        #[cfg(target_os = "linux")]
+        {
+            use gtk::prelude::WidgetExt;
+            use webkit2gtk::glib::translate::FromGlibPtrNone;
+            use std::sync::atomic::Ordering;
+            let ptr = state::FIXED_CONTAINER.load(Ordering::SeqCst);
+            if !ptr.is_null() {
+                let fixed = unsafe {
+                    <gtk::Fixed as FromGlibPtrNone<*mut gtk::ffi::GtkFixed>>::from_glib_none(
+                        ptr as *mut gtk::ffi::GtkFixed,
+                    )
+                };
+                fixed.set_margin_start(x as i32);
+                fixed.set_margin_top(y as i32);
+                fixed.set_size_request(
+                    (width.max(200.0)) as i32,
+                    (height.max(100.0)) as i32,
+                );
+            }
+        }
+        // Also update Tauri's internal webview state for consistency
+        // (keeps wry's bounds tracking in sync even though the GTK
+        //  widget is managed by our fixed container).
+        if let Some(win) = _app.get_window("main") {
+            for wv in win.webviews() {
+                if wv.label().starts_with("tab_") {
+                    let _ = wv.set_size(LogicalSize::new(
+                        width.max(200.0), height.max(100.0),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Closes a tab webview by label.
+#[tauri::command]
+pub fn close_tab(app: tauri::AppHandle, tab_label: String) -> Result<(), String> {
+    on_main_thread(&app, move |app| {
+        if let Some(wv) = app.get_webview(&tab_label) {
+            wv.close().map_err(|e| format!("Close failed: {e}"))
+        } else {
+            Ok(())
+        }
+    })
+}
+
+/// Switches to the given tab — hides all others, shows the target.
+#[tauri::command]
+pub fn switch_tab(app: tauri::AppHandle, tab_label: String) -> Result<(), String> {
+    on_main_thread(&app, move |app| {
+        let main_window = app
+            .get_window("main")
+            .ok_or_else(|| "Main window not found".to_string())?;
+        for wv in main_window.webviews() {
+            let label = wv.label().to_string();
+            if label.starts_with("tab_") {
+                if label == tab_label {
+                    wv.show().map_err(|e| format!("Show failed: {e}"))?;
+                } else {
+                    wv.hide().map_err(|e| format!("Hide failed: {e}"))?;
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
 /// Downloads an image from the given URL (bypassing browser CORS) and writes
 /// it to the system clipboard. The MIME type is derived from the HTTP response
 /// Content-Type header so the clipboard carries the correct image format.
@@ -272,116 +569,6 @@ pub fn copy_image(image_url: String) -> Result<(), String> {
             mime_type: wl_clipboard_rs::copy::MimeType::Specific(mime),
         }])
         .map_err(|e| format!("Clipboard: {e}"))?;
-
-    Ok(())
-}
-
-#[tauri::command]
-pub fn open_account(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    account_id: String,
-) -> Result<(), String> {
-    let account = {
-        let config = state.config.read().map_err(|e| e.to_string())?;
-        config
-            .accounts
-            .iter()
-            .find(|a| a.id == account_id)
-            .cloned()
-            .ok_or_else(|| "Account not found".to_string())?
-    };
-
-    let label = format!("account_{}", account.id);
-    let target_url = account
-        .url
-        .parse::<Url>()
-        .map_err(|e| format!("Invalid URL: {e}"))?;
-    let session_dir = state.sessions_dir.join(&account.id);
-
-    std::fs::create_dir_all(&session_dir).map_err(|e| format!("{e}"))?;
-
-    // Navigate directly to target — TLS policy and init script are set
-    // synchronously during build() before the event loop runs, so the
-    // first network request always has our config applied.
-    let window = tauri::WebviewWindowBuilder::new(
-        &app,
-        &label,
-        WebviewUrl::External(target_url.clone()),
-    )
-    .data_directory(session_dir)
-    .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
-    .title(&account.label)
-    .inner_size(1280.0, 800.0)
-    .min_inner_size(800.0, 600.0)
-    .initialization_script(&build_init_script(&account.platform))
-    .enable_clipboard_access()
-    // X login opens OAuth popups — allow them by default
-    .on_new_window(|_url, _features| {
-        tauri::webview::NewWindowResponse::Allow
-    })
-    // Native "Save As…" dialog on download
-    .on_download(|_webview, event| {
-        match event {
-            tauri::webview::DownloadEvent::Requested { url, destination } => {
-                let name = url
-                    .path_segments()
-                    .and_then(|s| s.last())
-                    .unwrap_or("download")
-                    .to_string();
-                if let Some(dlg) = rfd::FileDialog::new()
-                    .set_title("Save As…")
-                    .set_file_name(&name)
-                    .save_file()
-                {
-                    *destination = dlg;
-                    true
-                } else {
-                    false
-                }
-            }
-            _ => true,
-        }
-    })
-    .build()
-    .map_err(|e| format!("Failed to create window: {e}"))?;
-
-    #[cfg(target_os = "linux")]
-    {
-        use webkit2gtk::{WebViewExt, WebContextExt, TLSErrorsPolicy, SettingsExt, HardwareAccelerationPolicy};
-        // ponytail: clone() so window survives with_webview() consuming self.
-        #[allow(deprecated)]
-        window
-            .clone()
-            .with_webview(move |pwv| {
-                if let Some(ctx) = pwv.inner().context() {
-                    ctx.set_tls_errors_policy(TLSErrorsPolicy::Ignore);
-                }
-                if let Some(settings) = pwv.inner().settings() {
-                    settings.set_javascript_can_open_windows_automatically(true);
-                    settings.set_javascript_can_access_clipboard(true);
-                    settings.set_enable_webgl(true);
-                    settings.set_enable_webaudio(true);
-                    settings.set_enable_media(true);
-                    settings.set_enable_mediasource(true);
-                    settings.set_enable_media_capabilities(true);
-                    settings.set_enable_media_stream(true);
-                    settings.set_enable_encrypted_media(true);
-                    settings.set_enable_fullscreen(true);
-                    settings.set_enable_page_cache(true);
-                    settings.set_enable_smooth_scrolling(false);
-                    settings.set_enable_site_specific_quirks(true);
-                    settings.set_enable_accelerated_2d_canvas(true);
-                    settings.set_enable_developer_extras(false);
-                    settings.set_enable_webrtc(true);
-                    settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::Always);
-                }
-            })
-            .map_err(|e| format!("Failed to configure webview: {e}"))?;
-    }
-
-    // ponytail: devtools active in all builds while debugging Zalo
-    window.open_devtools();
 
     Ok(())
 }

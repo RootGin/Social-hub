@@ -1,7 +1,37 @@
 use serde::{Deserialize, Serialize};
+use std::ffi::c_void;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicPtr;
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// GtkFixed container where tab webviews are placed.
+/// Stored as a raw pointer because gtk::Fixed doesn't implement Sync.
+/// Only dereferenced on the GTK main thread (enforced by all call sites
+/// using on_main_thread).
+#[cfg(target_os = "linux")]
+pub static FIXED_CONTAINER: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Viewport {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+impl Viewport {
+    pub fn is_valid(self) -> bool {
+        self.width > 0.0 && self.height > 0.0
+    }
+}
+
+pub static VIEWPORT: std::sync::Mutex<Viewport> = std::sync::Mutex::new(Viewport {
+    x: 0.0,
+    y: 0.0,
+    width: 0.0,
+    height: 0.0,
+});
 
 /// ponytail: avoids uuid crate. If collisions become a problem, swap to `uuid`.
 pub fn generate_id() -> String {

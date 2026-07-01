@@ -1,6 +1,6 @@
 <script>
   import { invoke } from "@tauri-apps/api/core";
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
 
   let accounts = [];
   let error = "";
@@ -9,9 +9,47 @@
   let editing = null;      // account id whose label is being edited
   let editValue = "";      // current value in the edit input
 
+  // Tab state
+  let tabs = [];           // { label, title, platform }
+  let activeTab = null;    // label of the active tab
+
   let newPlatform = "zalo";
   let newLabel = "";
   let newUrl = "";
+
+  // Track the viewport div so ResizeObserver can tell Rust where to put webviews
+  let viewportEl = null;
+  let resizeObserver = null;
+
+  function tellRustViewport() {
+    if (!viewportEl) return;
+    const r = viewportEl.getBoundingClientRect();
+    invoke("update_viewport", {
+      x: r.x, y: r.y, width: r.width, height: r.height,
+    }).catch(() => {});
+  }
+
+  // waitForLayout: getBoundingClientRect returns 0s if called before the
+  // browser has run flexbox layout. A single rAF often isn't enough — wait
+  // two frames so the document has fully laid out and the rect is real.
+  function waitForLayout() {
+    return new Promise((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(resolve));
+    });
+  }
+
+  onMount(() => {
+    loadAccounts();
+    // Send initial viewport rect after flexbox layout is committed.
+    // getBoundingClientRect() on a freshly-mounted element returns 0s
+    // because the browser hasn't run layout yet — waitForLayout() polls
+    // until the rect stabilizes so the first tab webview lands in the
+    // right place (not covering the sidebar).
+    waitForLayout().then(tellRustViewport);
+    // Observe viewport size/position changes and relay to Rust
+    resizeObserver = new ResizeObserver(tellRustViewport);
+    if (viewportEl) resizeObserver.observe(viewportEl);
+  });
 
   // SVGs simplified from Ferdium's recipe icons for 24x24 sidebar buttons.
   const PLATFORMS = [
@@ -96,13 +134,54 @@
     editValue = "";
   }
 
-  async function openAccount(id) {
+  async function openAccount(id, platform, label) {
     try {
       error = "";
+      const tabLabel = `tab_${id}`;
+      const isNewTab = !tabs.find(t => t.label === tabLabel);
+
+      if (isNewTab) {
+        // Register the tab FIRST so the tab bar renders and `.viewport`
+        // gets its real flex-grown size, then wait for Svelte to commit
+        // AND the browser to run flexbox layout. tick() alone isn't enough
+        // — getBoundingClientRect() on a freshly-laid-out element still
+        // returns stale coords until two animation frames have passed.
+        tabs = [...tabs, { label: tabLabel, title: label, platform }];
+        await tick();
+        await waitForLayout();
+        tellRustViewport();
+      }
+
+      activeTab = tabLabel;
       await invoke("open_account", { accountId: id });
+      if (activeTab !== tabLabel) {
+        // User switched tabs again while open_account was in flight
+        await invoke("switch_tab", { tabLabel });
+      }
     } catch (e) {
       error = String(e);
+      // Roll back optimistic tab registration if creation actually failed
+      tabs = tabs.filter(t => t.label !== `tab_${id}`);
+      if (activeTab === `tab_${id}`) {
+        activeTab = tabs.length > 0 ? tabs[tabs.length - 1].label : null;
+      }
     }
+  }
+
+  async function switchTab(tabLabel) {
+    activeTab = tabLabel;
+    try { await invoke("switch_tab", { tabLabel }); } catch (e) {}
+  }
+
+  async function closeTab(tabLabel) {
+    try { await invoke("close_tab", { tabLabel }); } catch (e) {}
+    tabs = tabs.filter(t => t.label !== tabLabel);
+    if (activeTab === tabLabel) {
+      activeTab = tabs.length > 0 ? tabs[tabs.length - 1].label : null;
+      if (activeTab) await invoke("switch_tab", { tabLabel: activeTab });
+    }
+    // Viewport size may have changed (tab bar narrower)
+    waitForLayout().then(tellRustViewport);
   }
 
   // ponytail: WebKitGTK can't render Zalo/Facebook web apps — give users an escape hatch.
@@ -126,7 +205,7 @@
 
 </script>
 
-<div class="shell">
+<div class="shell" class:has-tabs={tabs.length > 0}>
   <nav class="sidebar">
     <div class="sidebar-top">
       <button
@@ -174,6 +253,27 @@
   </nav>
 
   <main class="content">
+    {#if tabs.length > 0}
+      <div class="tab-bar">
+        {#each tabs as tab}
+          <button
+            class="tab"
+            class:active={activeTab === tab.label}
+            on:click={() => switchTab(tab.label)}
+            style="--accent: {(platformMap[tab.platform] || {}).color || '#888'}"
+          >
+            <span class="tab-icon">{@html (platformMap[tab.platform] || {}).svg || ''}</span>
+            <span class="tab-title">{tab.title}</span>
+            <button class="tab-close" on:click|stopPropagation={() => closeTab(tab.label)}>×</button>
+          </button>
+        {/each}
+      </div>
+    {/if}
+
+    <!-- The native tab webviews render at this div's coordinates -->
+    <div bind:this={viewportEl} class="viewport"></div>
+
+    {#if tabs.length === 0}
     {#if error}
       <div class="toast error-toast">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.5"/><path d="M5.5 5.5l5 5M10.5 5.5l-5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
@@ -261,7 +361,7 @@
               <div class="card-url">{account.url}</div>
             </div>
             <div class="card-actions">
-              <button class="btn btn-primary btn-sm" on:click={() => openAccount(account.id)}>
+              <button class="btn btn-primary btn-sm" on:click={() => openAccount(account.id, account.platform, account.label)}>
                 Open
               </button>
               <button class="btn btn-ghost btn-sm" on:click={() => openInBrowser(account.url)} title="Open in system browser">
@@ -269,13 +369,14 @@
               </button>
               <button class="btn btn-danger btn-sm" on:click={() => removeAccount(account.id)}>
                 <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-                  <path d="M2 4h10M5 4V2.5A.5.5 0 015.5 2h3a.5.5 0 01.5.5V4M3 4v7.5A1.5 1.5 0 004.5 13h5a1.5 1.5 0 001.5-1.5V4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="M2 4h10M5 4V2.5A.5.5 0 015.5 2h3a.5.5 0 01.5.5V4M3 4v7.5A1.5 1.5 0 004.5 13h5a1.5 1.5 0 001.5-1.5V4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
                 </svg>
               </button>
             </div>
           </div>
         {/each}
       </div>
+    {/if}
     {/if}
   </main>
 </div>
@@ -288,8 +389,8 @@
 
   /* ── Sidebar ── */
   .sidebar {
-    width: 4.5rem;
-    min-width: 4.5rem;
+    width: 72px;
+    min-width: 72px;
     background: #161618;
     border-right: 1px solid #222225;
     display: flex;
@@ -748,5 +849,107 @@
   }
   .list::-webkit-scrollbar-thumb:hover {
     background: #3a3a3e;
+  }
+
+  /* ── Tab bar ── */
+  .tab-bar {
+    display: flex;
+    align-items: stretch;
+    height: 40px;
+    min-height: 40px;
+    background: #1a1a1d;
+    border-bottom: 1px solid #2a2a2e;
+    overflow-x: auto;
+    overflow-y: hidden;
+    flex-shrink: 0;
+  }
+  .tab-bar::-webkit-scrollbar {
+    height: 2px;
+  }
+  .tab-bar::-webkit-scrollbar-thumb {
+    background: #3a3a3e;
+    border-radius: 1px;
+  }
+
+  .tab {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    padding: 0 0.75rem;
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: #68686e;
+    font-size: 0.75rem;
+    font-family: inherit;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all 0.12s ease;
+    min-width: 0;
+    flex-shrink: 1;
+  }
+  .tab:hover {
+    background: #222225;
+    color: #c8c8cc;
+  }
+  .tab.active {
+    border-bottom-color: var(--accent, #888);
+    color: #e8e8ea;
+    background: #222225;
+  }
+
+  .tab-icon {
+    display: flex;
+    align-items: center;
+    width: 1rem;
+    height: 1rem;
+    flex-shrink: 0;
+  }
+  .tab-icon :global(svg) {
+    width: 100%;
+    height: 100%;
+  }
+
+  .tab-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 10rem;
+  }
+
+  .tab-close {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.25rem;
+    height: 1.25rem;
+    border: none;
+    border-radius: 0.25rem;
+    background: transparent;
+    color: inherit;
+    font-size: 1rem;
+    line-height: 1;
+    cursor: pointer;
+    flex-shrink: 0;
+    opacity: 0.5;
+    transition: opacity 0.12s;
+  }
+  .tab-close:hover {
+    opacity: 1;
+    background: rgba(255, 255, 255, 0.1);
+  }
+
+  /* ── Viewport (native webview render target) ── */
+  .viewport {
+    flex: 1;
+    position: relative;
+    min-height: 0;
+  }
+  /* When no tabs are open the viewport must not take flex space
+     or it pushes dashboard content to the bottom of the window. */
+  .shell:not(.has-tabs) .viewport {
+    flex: 0;
+    height: 0;
+    min-height: 0;
+    overflow: hidden;
   }
 </style>
